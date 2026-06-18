@@ -7,7 +7,6 @@ from indicnlp.tokenize import indic_tokenize
 from google import genai
 from dotenv import load_dotenv
 
-# Reusing your original GorkhapatraRulesIndexer from src/byakaran/gopaindexer.py
 from src.byakaran.gopaindexer import GorkhapatraRulesIndexer
 
 load_dotenv()
@@ -21,12 +20,14 @@ class AdvancedNepaliByakaranEngine:
         self.nepali_suffixes = ["ले", "लाई", "का", "की", "को", "मा", "बाट", "देखि", "हरू"]
         
         api_token = os.getenv("GEMINI_API_KEY")
+        # Explicit pass here as well to force the fresh token swap
         self.client = genai.Client(api_key=api_token)
+        
+        # self.client = genai.Client()
         self.model_name = "gemini-2.5-flash"
         
-        # Point directly to your custom data file
         self.indexer = GorkhapatraRulesIndexer()
-        self.indexer.load_pdf_rules() # Loads data/bhasasaili.json natively
+        self.indexer.load_pdf_rules("data/gorkhapatra_rules.pdf")
 
     def _levenshtein_suggest(self, word: str) -> str:
         if word in self.vocabulary or len(word) <= 2:
@@ -68,59 +69,16 @@ class AdvancedNepaliByakaranEngine:
                 corrected_tokens.append(token)
         return " ".join(corrected_tokens), flags
 
-    def _sift_relevant_rules(self, text: str) -> str:
-        """
-        Tokenizes text context and maps intersections against bhasasaili keys.
-        Forces inclusion based on soft semantic tags rather than static keys.
-        """
-        rules_dict = self.indexer.rules_database
-        if not rules_dict:
-            return ""
-            
-        sifted_blocks = []
-        forced_keys_used = set()
-        
-        # 🚀 1. DYNAMIC ANCHOR FORCE-INJECTION (No static keys required)
-        # If any key in your database contains these words, it will be automatically forced
-        core_grammar_anchors = ["suffix", "postposition", "आदरार्थी", "हिज्जे", "व्याकरण"]
-        
-        for key, text_block in rules_dict.items():
-            if any(anchor in key.lower() for anchor in core_grammar_anchors):
-                sifted_blocks.append(f"[व्याकरण नियम ({key.replace('_', ' ')}))]: {text_block}")
-                forced_keys_used.add(key)
-                
-        # 🪐 2. SEMANTIC SEARCH FOR REMAINING TEXT BLOCKS
-        context_words = set(re.findall(r'[\u0900-\u097F]+', text.lower()))
-        
-        for key, text_block in rules_dict.items():
-            # Skip keys that were already force-injected above
-            if key in forced_keys_used:
-                continue
-                
-            key_tokens = set(key.split("_"))
-            if context_words.intersection(key_tokens):
-                # Isolate matching sentences from large value paragraphs
-                sentences = [s.strip() + "।" for s in text_block.split("।") if len(s.strip()) > 5]
-                for sentence in sentences:
-                    sentence_tokens = set(re.findall(r'[\u0900-\u097F]+', sentence))
-                    if context_words.intersection(sentence_tokens):
-                        compiled = f"[{key.replace('_', ' ')}]: {sentence}"
-                        if compiled not in sifted_blocks:
-                            sifted_blocks.append(compiled)
-                            
-        # Cap the output entries to preserve context window allocations safely
-        return "\n".join(sifted_blocks[:6])
-
     def _gorkhapatra_ai_pass(self, text: str) -> dict:
-        """Validates text structure using targeted dynamic textbook rules."""
-        extracted_guidelines = self._sift_relevant_rules(text)
+        """Validates text structure and breaks it into Title, Highlights, and Description fields."""
+        extracted_guidelines = "\n".join([f"- {rule}" for rule in self.indexer.rules_database])
 
         gorkhapatra_prompt = f"""
-        तपाईं गोरखापत्र (Gorkhapatra) को वरिष्ठ language सम्पादक (Copy Editor) हुनुहुन्छ। 
+        तपाईं गोरखापत्र (Gorkhapatra) को वरिष्ठ भाषा सम्पादक (Copy Editor) हुनुहुन्छ। 
         तल दिइएको नेपाली समाचार पाठलाई गोरखापत्रको आधिकारिक व्याकरण, हिज्जे र शैली पुस्तिका बमोजिम शुद्ध गर्नुहोस्।
 
-        तपाईंले यो विशिष्ट प्रसङ्गका लागि अनिवार्य रूपमा पालना गर्नुपर्ने गोरखापत्रका आन्तरिक नियमहरू:
-        {extracted_guidelines if extracted_guidelines else "- गोरखापत्र मानक भाषिक र व्याकरण शैली पालना गर्ने।"}
+        तपाईंले अनिवार्य रूपमा पालना गर्नुपर्ने गोरखापत्रका आन्तरिक नियमहरू:
+        {extracted_guidelines}
 
         तपाईंको जवाफ मात्र निम्न JSON ढाँचामा हुनुपर्छ, अरू केही पनि नलेख्नुहोस्:
         {{
@@ -130,13 +88,14 @@ class AdvancedNepaliByakaranEngine:
                 "मुख्य समाचारको मुख्य अंश वा हाइलाइट बुँदा २"
             ],
             "description": "गोरखापत्रको स्तरमा पूर्ण रूपमा शुद्ध गरिएको विस्तृत समाचार विवरण (Full Editorial Content)",
-            "logs": ["परिवर्तन गरिएको व्याकरण नियम विवरण १", "परिवर्तन गरिएको व्याकरण नियम विवरण २"]
+            "logs": ["परिवर्तन गरिएको व्याकरण नियम विविरण १", "परिवर्तन गरिएको व्याकरण नियम विविरण २"]
         }}
 
         समाचार पाठ:
         {text}
         """
 
+        # Set up a safe structured fallback dict if things crash
         fallback = {
             "title": "ताजा समाचार रिपोर्ट",
             "highlights": ["स्रोत सामग्रीहरू प्रशोधन गरियो।"],
@@ -167,8 +126,10 @@ class AdvancedNepaliByakaranEngine:
         
         cleaned_base_text = re.sub(r'\s+([।,.?])', r'\1', step3_text)
         
-        # Run AI pass with the targeted guidelines
+        # Run AI pass to get the structured dictionary object
         ai_structured_result = self._gorkhapatra_ai_pass(cleaned_base_text)
+        
+        # Combine local regex correction summaries with AI editing logs
         all_logs.extend(ai_structured_result.get("logs", []))
         
         return {
